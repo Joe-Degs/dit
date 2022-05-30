@@ -8,29 +8,31 @@ import (
 	"os"
 )
 
-//
+// FileBuffered provides the capabilities to do buffered io operations
 type FileBuffer struct {
-	// r/w is a buffered reader/writer. the underlying type
-	// is a bufio.Reader/Writer depending on the opcode of
-	// of the request
-	r io.Reader
-	w io.Writer
+	// r/w is a buffered reader/writer. the underlying type of the buffered
+	// object is determined by whether this is used for reading/writing to
+	// the underlying data source
+	r *bufio.Reader
+	w *bufio.Writer
 
+	// buf keeps the most recents data read/written from/to the underlying data
+	// source for retransmission
 	buf *bytes.Buffer
 }
 
-// FileBufferFunc is any function that takes a path and returns a file
-// buffer bound to the file the path points at.
+// FileBufferFunc is a function that takes a file path and creates a buffered io
+// object with the file as the underlying data source/storage
 //
-// why doesn't this filebuffer thing use the request.Filename to open the file??
 // TFTP servers are allowed to serve files from any directory(not only the root
 // filesystem). So paths are relative to the directory from which files are
-// being served from. The servers have more extensive and proper view of what
+// being served. The servers have a more extensive and proper view of what
 // the paths are supposed to mean so let them decide the path they want to use
 // by providing this type which is just a function
 type FileBufferFunc func(path string) (*FileBuffer, error)
 
-// NewFileBufferFunc returns the request of the
+// NewFileBufferFunc returns the request and a closure to open/create file and
+// embed it in a buffered io object for efficient reading/writing operations
 func NewFileBufferFunc(req *ReadWriteRequest) (*ReadWriteRequest, FileBufferFunc) {
 	var (
 		f          *os.File
@@ -40,7 +42,8 @@ func NewFileBufferFunc(req *ReadWriteRequest) (*ReadWriteRequest, FileBufferFunc
 	)
 
 	if op := req.opcode(); op == Rrq {
-		// open file for reading
+		// closure opens file and embeds it in a bufio.Reader for buffered io
+		// ops
 		bufferFunc = func(path string) (*FileBuffer, error) {
 			if f, err = os.Open(path); err != nil {
 				return nil, err
@@ -49,10 +52,9 @@ func NewFileBufferFunc(req *ReadWriteRequest) (*ReadWriteRequest, FileBufferFunc
 			return buf, nil
 		}
 	} else if op == Wrq {
-		// open and truncate file for writing
+		// closure creates file and embeds it in bufio.Writer for writing
 		bufferFunc = func(path string) (*FileBuffer, error) {
-			if f, err = os.OpenFile(path,
-				os.O_WRONLY|os.O_TRUNC|os.O_APPEND|os.O_CREATE, 0666); err != nil {
+			if f, err = os.Create(path); err != nil {
 				return nil, err
 			}
 			buf.w = bufio.NewWriter(f)
@@ -63,16 +65,23 @@ func NewFileBufferFunc(req *ReadWriteRequest) (*ReadWriteRequest, FileBufferFunc
 	return req, bufferFunc
 }
 
-// Read tries to read exactly len(b) bytes into byte slice b. If the bytes
-// left in the file at the end of read is not up to len(b) then it returns
-// the io.EOF error to signal end of file.
+// Read tries to read exactly len(b) from the underlying buffered io object into
+// b. If returns the the number of bytes copied and an error if fewer
+// than len(b) bytes were read. It returns an io.EOF if no bytes are read and
+// an io.ErrUnexpectedEOF if an io.EOF is ecountered while reading from source
 func (f *FileBuffer) Read(b []byte) (int, error) {
 	return io.ReadFull(f.r, b)
 }
 
-// ReadNext tries to returns the next set of len(b) bytes from the
+// Write tries to write len(p) bytes to the underlying data stream. the
+// behaviour of this funtion is defined by io.Writer and bufio.Writer.Write
+func (f *FileBuffer) Write(b []byte) (int, error) {
+	return f.w.Write(b)
+}
+
+// ReadNext tries to return the next set of len(b) bytes from the
 // underlying data source. Keeping the bytes read in a temporary buffer
-// incase there is the need to retransmit it
+// incase there is the need to retransmit it.
 func (f *FileBuffer) ReadNext(b []byte) (int, error) {
 	// read next bunch of bytes from underlying storage
 	read, err := f.Read(b)
@@ -91,10 +100,16 @@ func (f *FileBuffer) ReadNext(b []byte) (int, error) {
 	// at this stage we have either;
 	// 1. read exactly len(b) bytes and have written it to tmp buffer
 	// 2. read less than len(b) bytes and have written it to tmp buffer
-	// 3. read nothing and written nothing
+	// 3. read nothing and written nothing to tmp buffer
 	return read, err
 }
 
+// WriteNext tries to write the next set of len(p) bytes to the underlying data
+// stream, keeping the same amount of bytes written in a temporary buffer.
+// It returns the number of bytes written from p if the write stopped early,
+// if the write to the temporary buffer results in an error or if the number
+// of bytes written to temporary buffer is less than the number written to
+// underlying data source
 func (f *FileBuffer) WriteNext(b []byte) (int, error) {
 	// try to write len(b) bytes to the underlying storage
 	wrote, err := f.Write(b)
@@ -119,12 +134,12 @@ func (f *FileBuffer) WriteNext(b []byte) (int, error) {
 }
 
 // BufferLen returns the length of the temporary buffer storing the most
-// recent data read/written from/to underlying storage
+// recent data from/to the underlying data stream
 func (f *FileBuffer) BufferLen() int {
 	return f.buf.Len()
 }
 
-// ReadBuffer copies tries to copy len(b) bytes from the temporary buffer
+// ReadBuffer tries to copy len(b) bytes from the temporary buffer
 //
 // if you want exactly all the amount of data in the buffer then you have
 // to supply a buffer with length >= f.BufferLen()
@@ -142,17 +157,11 @@ func (f *FileBuffer) BufferedObject() any {
 	return f.w
 }
 
-// Write
-//
-// use only when handling write requests
-func (f *FileBuffer) Write(b []byte) (int, error) {
-	return f.w.Write(b)
-}
-
-// Close the bufio objects and flush the writer
+// Close resources associated with buffered io operations
 func (f *FileBuffer) Close() error {
 	if f.w != nil {
-		return f.w.(*bufio.Writer).Flush()
+		return f.w.Flush()
 	}
+	f.buf.Reset()
 	return nil
 }
