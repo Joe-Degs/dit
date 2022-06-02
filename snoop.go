@@ -56,7 +56,7 @@ func (c *Conn) SnoopWithPacket(pk Packet) {
 			log.Fatal(err)
 		}
 
-		pack, err := DecodePacket(data[:n])
+		pack, err := MarshalPacket(data[:n])
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -69,7 +69,7 @@ func (c *Conn) SnoopWithPacket(pk Packet) {
 				Opcode:      Ack,
 				BlockNumber: data.BlockNumber,
 			}
-			if bytes, err := MarshalPacket(ack); err == nil {
+			if bytes, err := UnmarshalPacket(ack); err == nil {
 				c.Write(bytes)
 			} else {
 				log.Fatal(err)

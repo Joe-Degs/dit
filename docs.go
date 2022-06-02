@@ -1,3 +1,3 @@
 package dit
 
-//go:generate stringer -type=Opcode,ErrorCode -output=string.go
+//go:generate stringer -type=Opcode,ErrorCode,Option -output=string.go

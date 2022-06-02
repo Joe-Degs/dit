@@ -4,7 +4,10 @@ package dit
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 	"unicode/utf8"
 )
 
@@ -15,13 +18,13 @@ type Packet interface {
 	unmarshal([]byte) error
 }
 
+// extract the opcode from a byte packet
 func opcode(b []byte) Opcode {
 	return Opcode(binary.BigEndian.Uint16(b[0:2]))
 }
 
-// TODO(Joe-Degs): change decode packet to MarshalPacket or something and
-// remove the depency on encoding. U don't really need that.
-func DecodePacket(b []byte) (Packet, error) {
+// MarshalPacket decodes the binary packet into a structured Packet type
+func MarshalPacket(b []byte) (Packet, error) {
 	var p Packet
 	switch op := opcode(b); op {
 	case Rrq, Wrq:
@@ -30,6 +33,8 @@ func DecodePacket(b []byte) (Packet, error) {
 		p = &DataPacket{Opcode: op}
 	case Ack:
 		p = &AckPacket{Opcode: op}
+	case OAck:
+		p = &OAckPacket{Opcode: op}
 	case Error:
 		p = &ErrorPacket{Opcode: op}
 	default:
@@ -43,9 +48,7 @@ func DecodePacket(b []byte) (Packet, error) {
 	return p, nil
 }
 
-// MarshalPacket turns a structured packet to its binary representation
-// for sending over the wire
-func MarshalPacket(p Packet) ([]byte, error) {
+func UnmarshalPacket(p Packet) ([]byte, error) {
 	if p == nil {
 		return nil, fmt.Errorf("dit: cannot marshal nil packet")
 	}
@@ -61,7 +64,94 @@ const (
 	Data                    // Data Type
 	Ack                     // Acknowledgement Type
 	Error                   // Error Type
+	OAck                    // Optional Acknowlegdement type
 )
+
+// An optional extension as specified in rfc2347
+// options and their values are case insensitive ASCII but for a little more
+// efficiency they will be stored over here as uint8 constants
+type Option uint8
+
+const (
+	// RFC2348
+	Blksize Option = iota // block size option, valid values range from 8-65464 inclusive
+
+	// RFC2349
+	Timeout // timeout interval option, valid values range from 1-255 secs inclusive
+	Tsize   // transfer size option, value is the size of file to be transfered
+
+	// RFC7440
+	//
+	// windowsize option. this option specifies the number of blocks to transmit
+	// before accepting an acknowledgment. valid values are between 1-65535
+	// inclusive
+	Windowsize
+
+	// unknown to signal the server cannot parse the null terminated option
+	// that it was presented
+	Unknown
+)
+
+var ErrInvalidOptVal = errors.New("dit: invalid option value")
+
+func ValidateOptValue(opt Option, val string) (int, error) {
+	valInt, err := strconv.Atoi(val)
+	if err != nil {
+		return valInt, err
+	}
+
+	switch opt {
+	case Blksize:
+		// valid values range from 8-65464
+		if valInt >= 8 && valInt <= 65464 {
+			return valInt, nil
+		}
+	case Timeout:
+		// valid values range from 1-255 secs inclusive
+		if valInt >= 1 && valInt <= 255 {
+			return valInt, nil
+		}
+	case Tsize:
+		return valInt, nil
+	case Windowsize:
+		// valid values are between 1-65535 inclusive
+		if valInt >= 1 && valInt <= 65535 {
+			return valInt, nil
+		}
+	}
+
+	return 0, ErrInvalidOptVal
+}
+
+func MarshalOpts(opt string) Option {
+	switch strings.ToLower(opt) {
+	case "blksize":
+		return Blksize
+	case "timeout":
+		return Timeout
+	case "tsize":
+		return Tsize
+	case "windowsize":
+		return Windowsize
+	default:
+		return Unknown
+	}
+}
+
+func UnmarshalOpts(opt Option) string {
+	switch opt {
+	case Blksize:
+		return "blksize"
+	case Timeout:
+		return "timeout"
+	case Tsize:
+		return "tsize"
+	case Windowsize:
+		return "windowsize"
+	default:
+		return "unknown"
+	}
+}
 
 // ReadWriteRequest is a TFTP read/write request packet as described in RFC1350,
 // apendix I
@@ -69,52 +159,153 @@ type ReadWriteRequest struct {
 	Opcode   Opcode
 	Filename string
 	Mode     string
+
+	// tftp option extensions are appended to the read/write
+	// requests as null terminated string pairs (option => value)
+	Options map[Option]int
+}
+
+// loop through a byte slice and retrieve all null terminated strings as
+// proper golang utf8 string values
+func getNullTerminatedStrings(strs []byte) ([]string, error) {
+	strVals := make([]string, 0, 4)
+
+	// loop only if we have atleast one null terminated character
+	if len(strs) >= 2 {
+		// loop through byte slice and pick out all the strings in it
+		var lastNull int
+		for i, s := range strs {
+
+			// if a null byte is encountered we read byte from last null position
+			// to new null position, and keep it in a slice for later processing
+			if s == 0 {
+				if bytes := strs[lastNull:i]; len(bytes) >= 1 {
+					if !utf8.Valid(bytes) {
+						// returns the string values extracted so far if an
+						// error is encountered while extracting
+						return strVals, fmt.Errorf("dit: filename contains illegal utf8 values, %s", bytes)
+					}
+					strVals = append(strVals, string(bytes))
+					lastNull = i + 1
+				}
+			}
+		}
+	}
+	return strVals, nil
 }
 
 func (p *ReadWriteRequest) unmarshal(b []byte) error {
-	// p.Opcode = Opcode(binary.BigEndian.Uint16(b[0:2]))
-
-	// strings are null terminated bytes
-	strs := b[2:]
-	for i, s := range strs {
-
-		// find the first null byte
-		if s == 0 {
-			// decode filename null terminated string
-			if bytes := strs[:i]; len(bytes) >= 1 {
-				if !utf8.Valid(bytes) {
-					return fmt.Errorf("dit: filename contains illegal utf8 values, %s", bytes)
-				}
-				p.Filename = string(bytes)
-			}
-
-			// get the rest null terminated string as mode
-			if bytes := strs[i+1 : len(strs)-1]; len(bytes) >= 1 {
-				if !utf8.Valid(bytes) {
-					return fmt.Errorf("dit: mode does not contain valid utf8, %s", bytes)
-				}
-				p.Mode = string(bytes)
-			}
-			break
-		}
-
+	strVals, err := getNullTerminatedStrings(b[2:])
+	if err != nil {
+		return err
 	}
-	return nil
+
+	// options are extensions and if there is a problem parsing one, it is not
+	//  a reason to stop the parsing process, we continue to parse as much as
+	//  we can and then return the errors encountered afterwards
+	if len(strVals) >= 2 {
+		// we got some filename, mode and probably options
+		p.Filename = strVals[0]
+		p.Mode = strVals[1]
+
+		if optVals := strVals[2:]; len(optVals) >= 2 {
+			options := make(map[Option]int)
+			for i := 0; i < len(optVals); i += 2 {
+				opt := MarshalOpts(optVals[i])
+				if opt == Unknown {
+					continue
+				}
+				var val int
+				val, err = ValidateOptValue(opt, optVals[i+1])
+				if err == nil {
+					options[opt] = val
+				}
+			}
+
+			// give the options to the request if we got some
+			if len(options) >= 1 {
+				p.Options = options
+			}
+		}
+	}
+
+	return err
+}
+
+// convert go string to null terminated string of bytes
+func nullTerminate(s string) []byte {
+	return append([]byte(s), 0)
 }
 
 func (p *ReadWriteRequest) marshal() ([]byte, error) {
 	data := make([]byte, 2)
 	binary.BigEndian.PutUint16(data, uint16(p.Opcode))
-	data = append(data, append([]byte(p.Filename), 0)...)
-	data = append(data, append([]byte(p.Mode), 0)...)
-	if len(data) != 2+len(p.Filename)+len(p.Mode)+2 {
-		return nil, fmt.Errorf("dit: packet length not compatible with items")
+	data = append(data, nullTerminate(p.Filename)...)
+	data = append(data, nullTerminate(p.Mode)...)
+	// if len(data) != 2+len(p.Filename)+len(p.Mode)+2 {
+	// 	return nil, fmt.Errorf("dit: packet length not compatible with items")
+	// }
+	if len(p.Options) >= 1 {
+		for opt, val := range p.Options {
+			valStr := strconv.Itoa(val)
+			data = append(data, nullTerminate(UnmarshalOpts(opt))...)
+			data = append(data, nullTerminate(valStr)...)
+		}
 	}
 	return data, nil
 }
 
 func (p ReadWriteRequest) opcode() Opcode {
 	return p.Opcode
+}
+
+// OAckPacket is an optional acknowledgement packet structure as specified in
+// RFC2347
+type OAckPacket struct {
+	Opcode  Opcode
+	Options map[Option]int
+}
+
+func (OAckPacket) opcode() Opcode {
+	return OAck
+}
+
+func (p *OAckPacket) unmarshal(b []byte) error {
+	if optVals, err := getNullTerminatedStrings(b[2:]); len(optVals) >= 2 {
+		options := make(map[Option]int)
+		for i := 0; i < len(optVals); i += 2 {
+			opt := MarshalOpts(optVals[i])
+			if opt == Unknown {
+				continue
+			}
+			var val int
+			val, err = ValidateOptValue(opt, optVals[i+1])
+			if err == nil {
+				options[opt] = val
+			}
+		}
+
+		// give the options to the request if we got some
+		if len(options) >= 1 {
+			p.Options = options
+		}
+	} else if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (p *OAckPacket) marshal() ([]byte, error) {
+	data := make([]byte, 2)
+	binary.BigEndian.PutUint16(data, uint16(p.Opcode))
+	if len(p.Options) >= 1 {
+		for opt, val := range p.Options {
+			data = append(data, nullTerminate(UnmarshalOpts(opt))...)
+			data = append(data, nullTerminate(strconv.Itoa(val))...)
+		}
+	}
+	return data, nil
 }
 
 // DataPacket is a TFTP data packet as described in RFC1350, apendix I
@@ -129,20 +320,19 @@ func (DataPacket) opcode() Opcode {
 }
 
 func (p *DataPacket) unmarshal(b []byte) error {
-	// p.Opcode = Opcode(binary.BigEndian.Uint16(b[0:2]))
 	p.BlockNumber = binary.BigEndian.Uint16(b[2:4])
 
 	if l := len(b[4:]); l > 0 {
 		p.Data = make([]byte, l)
 		if lc := copy(p.Data, b[4:]); lc != l {
-			return fmt.Errorf("unmarshaling %d bytes failed", l)
+			return fmt.Errorf("dit: unable to copy all %d bytes", l)
 		}
 	}
 	return nil
 }
 
 func (p *DataPacket) marshal() ([]byte, error) {
-	data := make([]byte, 4)
+	data := make([]byte, 4, len(p.Data)+4)
 	binary.BigEndian.PutUint16(data[0:2], uint16(p.Opcode))
 	binary.BigEndian.PutUint16(data[2:4], p.BlockNumber)
 	return append(data, p.Data...), nil
@@ -159,7 +349,6 @@ func (AckPacket) opcode() Opcode {
 }
 
 func (p *AckPacket) unmarshal(b []byte) error {
-	// p.Opcode = Opcode(binary.BigEndian.Uint16(b[0:2]))
 	p.BlockNumber = binary.BigEndian.Uint16(b[2:4])
 	return nil
 }
@@ -184,6 +373,7 @@ const (
 	UnknownTID
 	FileAlreadyExists
 	NoSuchUser
+	RequestDenied
 )
 
 // ErrorPacket is a TFTP error packet as described in RFC1350,apendix I
@@ -198,20 +388,22 @@ func (ErrorPacket) opcode() Opcode {
 }
 
 func (p *ErrorPacket) unmarshal(b []byte) error {
-	// p.Opcode = Opcode(binary.BigEndian.Uint16(b[0:2]))
 	p.ErrorCode = ErrorCode(binary.BigEndian.Uint16(b[2:4]))
-	if bytes := b[4 : len(b)-1]; len(bytes) >= 1 {
-		if !utf8.Valid(bytes) {
-			return fmt.Errorf("dit: errmsg contains invalid utf8, %s", bytes)
+	if strVals, err := getNullTerminatedStrings(b[4:]); len(strVals) >= 1 {
+		p.ErrMsg = strVals[0]
+		if err != nil {
+			return err
 		}
-		p.ErrMsg = string(bytes)
+	} else if err != nil {
+		return err
 	}
 	return nil
 }
 
 func (p *ErrorPacket) marshal() ([]byte, error) {
-	data := make([]byte, 4)
+	data := make([]byte, 4, len(p.ErrMsg)+5)
 	binary.BigEndian.PutUint16(data[0:2], uint16(p.Opcode))
 	binary.BigEndian.PutUint16(data[2:4], uint16(p.ErrorCode))
-	return append(data, append([]byte(p.ErrMsg), 0)...), nil
+	data = append(data, nullTerminate(p.ErrMsg)...)
+	return data, nil
 }

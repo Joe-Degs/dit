@@ -159,7 +159,7 @@ func (c *Conn) Accept() (*Conn, error) {
 		}
 
 		// decode the new request
-		request, err := DecodePacket(buf[:n])
+		request, err := MarshalPacket(buf[:n])
 		if err != nil {
 			return nil, err
 		}
