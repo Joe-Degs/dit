@@ -1,5 +1,5 @@
 // packet contains types and functions to marshal/unmarshal TFTP packets as
-// described in RFC1350, apendix I.
+// described in RFC1350, RFC2347, RFC2348, RFC2349 and RFC7440
 package dit
 
 import (
@@ -23,7 +23,7 @@ func opcode(b []byte) Opcode {
 	return Opcode(binary.BigEndian.Uint16(b[0:2]))
 }
 
-// MarshalPacket decodes the binary packet into a structured Packet type
+// MarshalPacket marshals a binary packet into a packet structure
 func MarshalPacket(b []byte) (Packet, error) {
 	var p Packet
 	switch op := opcode(b); op {
@@ -48,6 +48,7 @@ func MarshalPacket(b []byte) (Packet, error) {
 	return p, nil
 }
 
+// UnmarshalPacket unmarshals a structured packet into its binary format
 func UnmarshalPacket(p Packet) ([]byte, error) {
 	if p == nil {
 		return nil, fmt.Errorf("dit: cannot marshal nil packet")
@@ -55,7 +56,7 @@ func UnmarshalPacket(p Packet) ([]byte, error) {
 	return p.marshal()
 }
 
-// An Opcode encodes the type of the packet
+// A TFTP protocol opcode as specified in rfc1350 and rfc2347
 type Opcode uint16
 
 const (
@@ -67,9 +68,8 @@ const (
 	OAck                    // Optional Acknowlegdement type
 )
 
-// An optional extension as specified in rfc2347
-// options and their values are case insensitive ASCII but for a little more
-// efficiency they will be stored over here as uint8 constants
+// Optional extensions as specified in rfc2347, rfc2348, rfc2349 and rfc7440.
+// The wire format of TFTP options are case insensitive null terminated strings
 type Option uint8
 
 const (
@@ -92,6 +92,8 @@ const (
 	Unknown
 )
 
+// ErrInvalidOptVal is returned if the value of an option is not between the
+// range of accepted values.
 var ErrInvalidOptVal = errors.New("dit: invalid option value")
 
 func ValidateOptValue(opt Option, val string) (int, error) {
@@ -123,6 +125,8 @@ func ValidateOptValue(opt Option, val string) (int, error) {
 	return 0, ErrInvalidOptVal
 }
 
+// MarshalOpts mashals an option string to its Option equivalent. It returns
+// Unknown if the option string is not recognized
 func MarshalOpts(opt string) Option {
 	switch strings.ToLower(opt) {
 	case "blksize":
@@ -138,6 +142,8 @@ func MarshalOpts(opt string) Option {
 	}
 }
 
+// Unmarshal convert an Option to its string equivalent. It returns "unknown" if
+// the option is not recognized.
 func UnmarshalOpts(opt Option) string {
 	switch opt {
 	case Blksize:
@@ -168,7 +174,7 @@ type ReadWriteRequest struct {
 // loop through a byte slice and retrieve all null terminated strings as
 // proper golang utf8 string values
 func getNullTerminatedStrings(strs []byte) ([]string, error) {
-	strVals := make([]string, 0, 4)
+	var strVals []string
 
 	// loop only if we have atleast one null terminated character
 	if len(strs) >= 2 {
@@ -242,9 +248,6 @@ func (p *ReadWriteRequest) marshal() ([]byte, error) {
 	binary.BigEndian.PutUint16(data, uint16(p.Opcode))
 	data = append(data, nullTerminate(p.Filename)...)
 	data = append(data, nullTerminate(p.Mode)...)
-	// if len(data) != 2+len(p.Filename)+len(p.Mode)+2 {
-	// 	return nil, fmt.Errorf("dit: packet length not compatible with items")
-	// }
 	if len(p.Options) >= 1 {
 		for opt, val := range p.Options {
 			valStr := strconv.Itoa(val)
@@ -285,7 +288,6 @@ func (p *OAckPacket) unmarshal(b []byte) error {
 			}
 		}
 
-		// give the options to the request if we got some
 		if len(options) >= 1 {
 			p.Options = options
 		}
@@ -373,6 +375,9 @@ const (
 	UnknownTID
 	FileAlreadyExists
 	NoSuchUser
+
+	// RequestDenied was introduced in the tftp optional extension rfc2347. with
+	// code "8" it is used to terminate a connection during option negotiation
 	RequestDenied
 )
 
@@ -390,7 +395,7 @@ func (ErrorPacket) opcode() Opcode {
 func (p *ErrorPacket) unmarshal(b []byte) error {
 	p.ErrorCode = ErrorCode(binary.BigEndian.Uint16(b[2:4]))
 	if strVals, err := getNullTerminatedStrings(b[4:]); len(strVals) >= 1 {
-		p.ErrMsg = strVals[0]
+		p.ErrMsg = strings.Join(strVals, " ")
 		if err != nil {
 			return err
 		}

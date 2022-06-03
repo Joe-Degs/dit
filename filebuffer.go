@@ -8,7 +8,9 @@ import (
 	"os"
 )
 
-// FileBuffered provides the capabilities to do buffered io operations
+// FileBuffer embeds a buffering IO object from the bufio package. It implements
+// an io.ReadWriteCloser object and has a temporary buffer for the most recent
+// io operation it has witnessed.
 type FileBuffer struct {
 	// r/w is a buffered reader/writer. the underlying type of the buffered
 	// object is determined by whether this is used for reading/writing to
@@ -139,7 +141,8 @@ func (f *FileBuffer) BufferLen() int {
 	return f.buf.Len()
 }
 
-// ReadBuffer tries to copy len(b) bytes from the temporary buffer
+// ReadBuffer tries to copy len(b) bytes from the temporary buffer into b and
+// returns the number of bytes copied
 //
 // if you want exactly all the amount of data in the buffer then you have
 // to supply a buffer with length >= f.BufferLen()
