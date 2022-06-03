@@ -1,11 +1,14 @@
 package main
 
-import "log"
+import (
+	"log"
+	"os"
+
+	"github.com/Joe-Degs/dit/server"
+)
 
 func main() {
-	srv, err := newServer("udp6", ":69")
-	if err != nil {
+	if err := server.Main(os.Args[1:], os.Stdout, os.Stderr); err != nil {
 		log.Fatal(err)
 	}
-	srv.start()
 }
