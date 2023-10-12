@@ -18,54 +18,41 @@ type FileBuffer struct {
 	r *bufio.Reader
 	w *bufio.Writer
 
+	// the file so we can close it when we are done
+	f io.ReadWriteCloser
+
 	// buf keeps the most recents data read/written from/to the underlying data
 	// source for retransmission
 	buf *bytes.Buffer
 }
 
-// FileBufferFunc is a function that takes a file path and creates a buffered io
-// object with the file as the underlying data source/storage
-//
-// TFTP servers are allowed to serve files from any directory(not only the root
-// filesystem). So paths are relative to the directory from which files are
-// being served. The servers have a more extensive and proper view of what
-// the paths are supposed to mean so let them decide the path they want to use
-// by providing this type which is just a function
-type FileBufferFunc func(path string) (*FileBuffer, error)
-
 // NewFileBufferFunc returns the request and a closure to open/create file and
 // embed it in a buffered io object for efficient reading/writing operations
-func NewFileBufferFunc(req *ReadWriteRequest) (*ReadWriteRequest, FileBufferFunc) {
-	var (
-		f          *os.File
-		err        error
-		bufferFunc FileBufferFunc
-		buf        = &FileBuffer{buf: new(bytes.Buffer)}
-	)
-
-	if op := req.opcode(); op == Rrq {
-		// closure opens file and embeds it in a bufio.Reader for buffered io
-		// ops
-		bufferFunc = func(path string) (*FileBuffer, error) {
-			if f, err = os.Open(path); err != nil {
-				return nil, err
-			}
-			buf.r = bufio.NewReader(f)
-			return buf, nil
-		}
-	} else if op == Wrq {
-		// closure creates file and embeds it in bufio.Writer for writing
-		bufferFunc = func(path string) (*FileBuffer, error) {
-			if f, err = os.Create(path); err != nil {
-				return nil, err
-			}
-			buf.w = bufio.NewWriter(f)
-			return buf, nil
-		}
-	}
-
-	return req, bufferFunc
+func NewFileBuffer() *FileBuffer {
+	return &FileBuffer{buf: new(bytes.Buffer)}
 }
+
+func (f *FileBuffer) WithRequest(op Opcode, file io.ReadWriteCloser) {
+	f.f = file
+	switch op {
+	case Rrq:
+		f.r = bufio.NewReader(file)
+	case Wrq:
+		f.w = bufio.NewWriter(file)
+	}
+	return
+}
+
+// checks if the file the buffer was created from is the same as other file
+func (f *FileBuffer) Is(other io.ReadWriteCloser) bool {
+	fi, ok := other.(*os.File)
+	if !ok {
+		return false
+	}
+	return f.f.(*os.File).Name() == fi.Name()
+}
+
+func (f *FileBuffer) Reset() { return }
 
 // Read tries to read exactly len(b) from the underlying buffered io object into
 // b. If returns the the number of bytes copied and an error if fewer

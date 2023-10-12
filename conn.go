@@ -6,9 +6,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/rand"
 	"net"
 	"net/netip"
-	"strings"
 	"sync"
 	"time"
 )
@@ -16,17 +16,18 @@ import (
 var (
 	// ErrUnexpectedTID is returned if a Conn connected and actively
 	// sending/recieving files recieves a packet from an other address
-	ErrUnexpectedTID = errors.New("dit: packet from unexpected TID (host)")
+	ErrUnexpectedTID = errors.New("packet from unexpected TID (host)")
 
 	// ErrClientAccept is returned if the Accept method is accidentally called
 	// on a client connection. Only listening connections (opened with the
 	// Listen function) are allowed to wait and accept new client connections.
-	ErrClientAccept = errors.New("dit: client cannot accept new connections")
+	ErrClientAccept = errors.New("client cannot accept new connections")
 )
 
 // Conn is a tftp connection and providing functionality to send, recieve and
 // serve files over the protocol
 type Conn struct {
+	mu sync.Mutex
 	// This is the primary connection, an active udp listener.
 	// If the Conn is a client (connected=true) it accepts
 	// packets from only destTID and writes only to it.
@@ -36,18 +37,12 @@ type Conn struct {
 	c *net.UDPConn
 
 	// This holds the address that a client is actively connected to.
-	destTID netip.AddrPort
+	destTID uint16
 
 	// True if the Conn is a client actively reading/writing to another
 	// client. False if Conn is a server and only listening for new connections
 	connected bool
-
-	// RequestBuffer is a function to return the request (that initiated a new
-	// connection ) and a closure to get a buffered io object bound to an
-	// underlying data stream when connected to a new client
-	RequestBuffer func() (*ReadWriteRequest, FileBufferFunc)
-
-	mu sync.Mutex
+	req       *ReadWriteRequest
 }
 
 // Write writes atmost len(b) bytes from b into the connection. If the
@@ -55,11 +50,6 @@ type Conn struct {
 // to that specific host instead. Otherwise it's behaviour is specified by the
 // net.Conn's Write method.
 func (c *Conn) Write(b []byte) (int, error) {
-	// write to specific connection if you are connected
-	if c.connected && c.destTID.IsValid() {
-		return c.c.WriteToUDPAddrPort(b, c.destTID)
-
-	}
 	return c.c.Write(b)
 }
 
@@ -73,8 +63,8 @@ func (c *Conn) Read(b []byte) (int, error) {
 	// if this is an active connection, but the write
 	// is from a different TID return unexpected TID error
 	if c.connected {
-		n, addr, err := c.ReadFromAddrPort(b)
-		if err == nil && addr != c.destTID {
+		n, addr, err := c.ReadFrom(b)
+		if err == nil && addr.Port() != c.destTID {
 			return n, ErrUnexpectedTID
 		}
 		return n, err
@@ -85,13 +75,7 @@ func (c *Conn) Read(b []byte) (int, error) {
 
 // ReadFrom waits and reads atmost len(b) bytes into b, returning the
 // number of bytes written and the address of the sender or an error
-func (c *Conn) ReadFrom(b []byte) (int, net.Addr, error) {
-	return c.c.ReadFrom(b)
-}
-
-// ReadFromAddrPort waits and reads atmost len(b) bytes into b, returning
-// the number of bytes written and the address of the sender or an error
-func (c *Conn) ReadFromAddrPort(b []byte) (int, netip.AddrPort, error) {
+func (c *Conn) ReadFrom(b []byte) (int, netip.AddrPort, error) {
 	return c.c.ReadFromUDPAddrPort(b)
 }
 
@@ -115,18 +99,16 @@ func (c *Conn) Addr() net.Addr {
 	return c.c.LocalAddr()
 }
 
-// Accept waits for new requests to the listening connection, creating new
-// Conn's out of accepted requests and ignoring the others
-//
-// This function is only supposed to be called on listening Conn's
-func (c *Conn) Accept() (*Conn, error) {
+func (c *Conn) Request() *ReadWriteRequest { return c.req }
+func (c Conn) TID() uint16 {
+	return c.destTID
+}
+
+func (c *Conn) AcceptRange(lo, hi uint16) (*Conn, error) {
 	if c.connected {
 		return nil, ErrClientAccept
 	}
 
-	// lock down connection so no other go routine can change
-	// the connection state while it is actively accepting
-	// connections
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -134,168 +116,86 @@ func (c *Conn) Accept() (*Conn, error) {
 	// go package see how they allocate memory for accept
 	buf := make([]byte, 256)
 	for {
-		n, clientTID, err := c.c.ReadFromUDP(buf)
+		n, raddr, err := c.c.ReadFromUDP(buf)
 		if err != nil {
-			return nil, fmt.Errorf("dit: accept: %w", err)
+			return nil, fmt.Errorf("accept: %w", err)
 		}
 
-		// TODO(Joe-Degs):
-		// is this right?, I dont really know man. Should this library
-		// sort of package be discarding packets???? shouldn't this be
-		// left for the server to decide?
 		if op := opcode(buf[:n]); op != Rrq && op != Wrq {
 			continue
 		}
 
-		// ephemeral port for the designated Conn as a unique TID
-		srvTID, err := net.ResolveUDPAddr(clientTID.Network(), "localhost:0")
-		if err != nil {
-			return nil, fmt.Errorf("dit: accept: %w", err)
-		}
-
-		conn, err := net.ListenUDP(clientTID.Network(), srvTID)
-		if err != nil {
-			return nil, fmt.Errorf("dit: accept: %w", err)
-		}
-
-		// decode the new request
 		request, err := MarshalPacket(buf[:n])
+		if err != nil {
+			return nil, err
+		}
+		req, ok := request.(*ReadWriteRequest)
+		if !ok {
+			return nil, errors.New("not a read or write request")
+		}
+
+		conn, err := connectWithRange(lo, hi, raddr)
 		if err != nil {
 			return nil, err
 		}
 
 		return &Conn{
 			c:         conn,
-			destTID:   clientTID.AddrPort(),
+			destTID:   raddr.AddrPort().Port(),
 			connected: true,
-			RequestBuffer: func() (*ReadWriteRequest, FileBufferFunc) {
-				return NewFileBufferFunc(request.(*ReadWriteRequest))
-			},
+			req:       req,
 		}, nil
 	}
 	return nil, nil
-
 }
 
-// DestinationTID returns the destination address (transfer identifier)
-// of a connection
-func (c *Conn) DestinationTID() *netip.AddrPort {
-	if c.connected {
-		return &c.destTID
-	}
-	return nil
+// Accept waits for new requests to the listening connection, creating new
+// Conn's out of accepted requests and ignoring the others
+//
+// This function is only supposed to be called on listening Conn's
+func (c *Conn) Accept() (*Conn, error) {
+	return c.AcceptRange(0, 0)
 }
 
-// SourceTID returns the source address (transfer identifier) of a connection
-func (c *Conn) SourceTID() *netip.AddrPort {
-	if c.connected {
-		addr := c.c.LocalAddr()
-		ipport, err := netip.ParseAddrPort(addr.String())
-		if err != nil {
-			return nil
+// given a range it will try to find a port (also the TID) in the range to connect with
+func connectWithRange(lo, hi uint16, remote *net.UDPAddr) (conn *net.UDPConn, err error) {
+	var local *net.UDPAddr
+
+	if lo == 0 && hi == 0 {
+		if local, err = net.ResolveUDPAddr(remote.Network(), ":0"); err != nil {
+			return nil, err
 		}
-		return &ipport
-	}
-	return nil
-}
-
-// Dial connects to a TFTP server and returns a connection to the server which
-// is a half open connection becuase with the TFTP protocol, the server creates
-// a random udp connection to handle every new request that it accepts.
-func Dial(network, address string) (*Conn, error) {
-	if !strings.Contains(network, "udp") {
-		return nil, fmt.Errorf("dit: protocol runs only over udp, %s", network)
+		if conn, err = net.DialUDP(remote.Network(), local, remote); err != nil {
+			return nil, err
+		}
+		return
 	}
 
-	// get an ephemeral local address for the client to listen for packets
-	tid, err := net.ResolveUDPAddr(network, "localhost:0")
-	if err != nil {
-		return nil, err
+	next := func() int { return rand.Intn(int(hi-lo+1)) + int(lo) }
+	rand.Seed(time.Now().UnixNano())
+	for i := 0; i > 10; i++ {
+		addr := fmt.Sprintf(":%d", next())
+		if local, err = net.ResolveUDPAddr(remote.Network(), addr); err != nil {
+			continue
+		}
+		if conn, err = net.DialUDP(remote.Network(), local, remote); err != nil {
+			continue
+		} else {
+			return
+		}
 	}
 
-	// resolve server address and store it as the initial TID of the server
-	raddr, err := net.ResolveUDPAddr(network, address)
-	if err != nil {
-		return nil, err
-	}
-
-	c, err := net.ListenUDP(network, tid)
-	if err != nil {
-		return nil, err
-	}
-
-	return &Conn{c: c, destTID: raddr.AddrPort()}, nil
-}
-
-// connect connects two endpoints wanting to send/recieve files from each other
-//
-// It takes two arguments; `in` buffer containing the request and `out` buffer
-// to write response into.
-// Its purpose is to send the initial packet that establishes connections
-// (read/write packets) and wait for a response from the server. if it
-// recieves a response, it keeps the address of the sender as the destination
-// TID
-func (c *Conn) connect(in []byte, out []byte) (n int, addr netip.AddrPort, err error) {
-	// send request to server
-	n, err = c.c.WriteToUDPAddrPort(in, c.destTID)
-	if err != nil {
-		return n, addr, fmt.Errorf("dit: connect write: %w", err)
-	}
-
-	// wait for response from a designated peer
-	c.SetReadDeadline(10 * time.Second)
-	n, addr, err = c.ReadFromAddrPort(out)
-	c.connected = true
-	c.destTID = addr
-	return n, addr, err
-}
-
-// newListenConn creates a new Conn object
-func newListenConn(conn net.PacketConn) (*Conn, error) {
-	udpConn, ok := conn.(*net.UDPConn)
-	if !ok {
-		return nil, fmt.Errorf("dit: only works over udp protocol: %T", conn)
-	}
-	return &Conn{
-		c: udpConn,
-	}, nil
-}
-
-// Listen announces on the network and returns a Conn that is capable of
-// waiting for and accepting new requests to the listener.
-//
-// The Conn returned from Listen does not respond to any clients, it merely
-// listens for read/write requests using the Accept method which returns
-// a Conn that is capable of responding back to clients
-func Listen(network, address string) (*Conn, error) {
-	if !strings.Contains(network, "udp") {
-		return nil, fmt.Errorf("dit: protocol runs only over udp, %s", network)
-	}
-
-	addr, err := net.ResolveUDPAddr(network, address)
-	if err != nil {
-		return nil, err
-	}
-
-	c, err := net.ListenUDP(network, addr)
-	if err != nil {
-		return nil, err
-	}
-
-	return newListenConn(c)
+	return
 }
 
 // ListenConfigConn is Listen but gives you more control over the behaviour
 // of the underlying socket connection.
 // This makes it possible to do things like set platform specific socket options
 // and adding a context to control lifetime of connections.
-func ListenConfigConn(ctx context.Context, cfg *net.ListenConfig, network, address string) (*Conn, error) {
-	if !strings.Contains(network, "udp") {
-		return nil, fmt.Errorf("dit: protocol runs only over udp, %s", network)
-	}
-	conn, err := cfg.ListenPacket(ctx, network, address)
+func ListenConfigConn(ctx context.Context, cfg *net.ListenConfig, address string) (*Conn, error) {
+	conn, err := cfg.ListenPacket(ctx, "udp", address)
 	if err != nil {
-		return nil, fmt.Errorf("dit: listenconfigconn: %w", err)
+		return nil, err
 	}
-	return newListenConn(conn)
+	return &Conn{c: conn.(*net.UDPConn)}, nil
 }

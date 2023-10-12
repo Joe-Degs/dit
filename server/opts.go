@@ -1,6 +1,8 @@
-package config
+package server
 
 import (
+	"io"
+
 	"github.com/DavidGamba/go-getoptions"
 )
 
@@ -26,6 +28,8 @@ type Opts struct {
 	Create     bool // --create|-c
 	Verbose    bool // --verbose|-v
 	Version    bool // --version|-V
+
+	Out, Err io.Writer
 }
 
 func NewOpts() (*Opts, *getoptions.GetOpt) {
@@ -62,4 +66,9 @@ func NewOpts() (*Opts, *getoptions.GetOpt) {
 	opt.BoolVar(&opts.Version, "version", false, opt.Alias("V"), opt.Description("Print out version of server and exit"))
 
 	return &opts, opt
+}
+
+func (o *Opts) outputs(out, err io.Writer) {
+	o.Out = out
+	o.Err = err
 }
