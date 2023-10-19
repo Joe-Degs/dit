@@ -24,7 +24,7 @@ func opcode(b []byte) Opcode {
 }
 
 // MarshalPacket marshals a binary packet into a packet structure
-func MarshalPacket(b []byte) (Packet, error) {
+func Marshal(b []byte) (Packet, error) {
 	var p Packet
 	switch op := opcode(b); op {
 	case Rrq, Wrq:
@@ -38,22 +38,41 @@ func MarshalPacket(b []byte) (Packet, error) {
 	case Error:
 		p = &ErrorPacket{Opcode: op}
 	default:
-		return nil, fmt.Errorf("dit: opcode %d not recognized", op)
+		return nil, fmt.Errorf("opcode %d not recognized", op)
 	}
 
 	if err := p.unmarshal(b); err != nil {
-		return nil, fmt.Errorf("dit: unmarshal packet: %w", err)
+		return nil, fmt.Errorf("unmarshal packet: %w", err)
 	}
 
 	return p, nil
 }
 
 // UnmarshalPacket unmarshals a structured packet into its binary format
-func UnmarshalPacket(p Packet) ([]byte, error) {
+func Unmarshal(p Packet) ([]byte, error) {
 	if p == nil {
-		return nil, fmt.Errorf("dit: cannot marshal nil packet")
+		return nil, fmt.Errorf("cannot marshal nil packet")
 	}
 	return p.marshal()
+}
+
+func encode(op Opcode, args ...any) ([]byte, error) {
+	var p Packet
+	switch op {
+	case Error:
+		p = &ErrorPacket{
+			Opcode:    op,
+			ErrorCode: args[0].(ErrorCode),
+			ErrMsg:    args[1].(string),
+		}
+	default:
+		return nil, fmt.Errorf("decode for %s not implemented", op)
+	}
+	b, err := p.marshal()
+	if err != nil {
+		return nil, err
+	}
+	return b, nil
 }
 
 // A TFTP protocol opcode as specified in rfc1350 and rfc2347

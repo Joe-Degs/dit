@@ -32,6 +32,23 @@ type Opts struct {
 	Out, Err io.Writer
 }
 
+// connection specific configuration variables
+type config struct {
+	BlockSize  int // --blocksize|-B max-block-size
+	Timeout    int // --timeout|-t secs
+	Retransmit int // --restransmit|-T
+
+	// tftp requests can create non-existent files
+	Create bool // --create|-c
+
+	// never accept specific tftp option
+	Refuse string // --refuse|-r tftp-option
+}
+
+func (o Opts) connConfig() config {
+	return config{o.BlockSize, o.Timeout, o.Retransmit, o.Create, o.Refuse}
+}
+
 func NewOpts() (*Opts, *getoptions.GetOpt) {
 	var opts Opts
 	opt := getoptions.New()

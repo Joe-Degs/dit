@@ -53,6 +53,10 @@ func (c *Conn) Write(b []byte) (int, error) {
 	return c.c.Write(b)
 }
 
+func (c *Conn) WriteTo(b []byte, addr *net.UDPAddr) (int, error) {
+	return c.c.WriteToUDP(b, addr)
+}
+
 // Read tries to read len(b) bytes from the connection to b. If the connection
 // is actively sending/reading files from/to another client, read only accepts
 // reads from that host. It throws ErrUnexpectedTID if it gets data from a host
@@ -109,6 +113,8 @@ func (c *Conn) AcceptRange(lo, hi uint16) (*Conn, error) {
 		return nil, ErrClientAccept
 	}
 
+	var err error
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -122,20 +128,19 @@ func (c *Conn) AcceptRange(lo, hi uint16) (*Conn, error) {
 		}
 
 		if op := opcode(buf[:n]); op != Rrq && op != Wrq {
+			_ = c.writeErrTo(IllegalOperation, "cannot perform operation", raddr)
 			continue
 		}
 
-		request, err := MarshalPacket(buf[:n])
+		req, err := Marshal(buf[:n])
 		if err != nil {
-			return nil, err
-		}
-		req, ok := request.(*ReadWriteRequest)
-		if !ok {
-			return nil, errors.New("not a read or write request")
+			_ = c.writeErrTo(NotDefined, "could not decode packet", raddr)
+			continue
 		}
 
 		conn, err := connectWithRange(lo, hi, raddr)
 		if err != nil {
+			err = c.writeErrTo(NotDefined, "could not connect", raddr)
 			return nil, err
 		}
 
@@ -143,10 +148,32 @@ func (c *Conn) AcceptRange(lo, hi uint16) (*Conn, error) {
 			c:         conn,
 			destTID:   raddr.AddrPort().Port(),
 			connected: true,
-			req:       req,
+			req:       req.(*ReadWriteRequest),
 		}, nil
 	}
-	return nil, nil
+	return nil, err
+}
+
+func (c *Conn) WriteErr(code ErrorCode, msg string) error {
+	b, err := encode(Error, code, msg)
+	if err != nil {
+		return err
+	}
+	if _, err := c.Write(b); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (c *Conn) writeErrTo(code ErrorCode, msg string, addr *net.UDPAddr) error {
+	b, err := encode(Error, code, msg)
+	if err != nil {
+		return err
+	}
+	if _, err := c.WriteTo(b, addr); err != nil {
+		return err
+	}
+	return nil
 }
 
 // Accept waits for new requests to the listening connection, creating new

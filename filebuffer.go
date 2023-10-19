@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 )
 
 // FileBuffer embeds a buffering IO object from the bufio package. It implements
@@ -40,19 +41,20 @@ func (f *FileBuffer) WithRequest(op Opcode, file io.ReadWriteCloser) {
 	case Wrq:
 		f.w = bufio.NewWriter(file)
 	}
-	return
 }
 
 // checks if the file the buffer was created from is the same as other file
-func (f *FileBuffer) Is(other io.ReadWriteCloser) bool {
-	fi, ok := other.(*os.File)
+func (f *FileBuffer) Is(name string) bool {
+	fi, ok := f.f.(*os.File)
 	if !ok {
 		return false
 	}
-	return f.f.(*os.File).Name() == fi.Name()
+	return filepath.Base(fi.Name()) == filepath.Base(name)
 }
 
-func (f *FileBuffer) Reset() { return }
+func (f *FileBuffer) Reset() {
+	f.buf.Reset()
+}
 
 // Read tries to read exactly len(b) from the underlying buffered io object into
 // b. If returns the the number of bytes copied and an error if fewer

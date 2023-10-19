@@ -4,6 +4,7 @@ package server
 import (
 	"context"
 	"net"
+	"os"
 	"syscall"
 
 	"github.com/Joe-Degs/dit"
@@ -30,4 +31,9 @@ func udpListen(addr string) (conn *dit.Conn, err error) {
 		return nil, err
 	}
 	return
+}
+
+func restartProcess() error {
+	proc := "/proc/self/exe"
+	return syscall.Exec(proc, os.Args, os.Environ())
 }
