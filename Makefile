@@ -9,6 +9,5 @@ all: $(APPS)
 $(APPS):
 	go build -race -o bin/$@ cmd/$@/main.go
 
-
 clean:
 	rm -f $(BINS)

@@ -61,7 +61,7 @@ func NewOpts() (*Opts, *getoptions.GetOpt) {
 	// options accepting string values
 	opt.StringVar(&opts.Address, "address", ":69", opt.Alias("a"), opt.Description("specify specific address and port to listen to when called with --listen or --foreground. the default is to listen on the tftp port specified in /etc/services on all local interfaces"))
 	opt.StringVar(&opts.PortRange, "port-range", "", opt.Alias("R"), opt.Description("Force the designated server port number (TID) to be in specififed range"))
-	opt.StringVar(&opts.Secure, "secure", "", opt.Alias("s"), opt.Description("Change the root sdirectory at server startup and serve/write files only fromt this directory. All paths are relative to the specified directory"))
+	opt.StringVar(&opts.Secure, "secure", "/srv/tftp", opt.Alias("s"), opt.Description("Change the root sdirectory at server startup and serve/write files only fromt this directory. All paths are relative to the specified directory"))
 	opt.StringVar(&opts.User, "user", "nobody", opt.Alias("u"), opt.Description("specify the username which the server will run as; the default is \"nobody\""))
 	opt.StringVar(&opts.Pidfile, "pidfile", "", opt.Alias("P"), opt.Description("Write the process id of server to pidfile. Delete said pidfile during normal termination (SIGINT, SIGTERM)"))
 	opt.StringVar(&opts.Verbosity, "verbosity", "", opt.Description("Set the verbosity level"))

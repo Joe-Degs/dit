@@ -1,10 +1,8 @@
 package server
 
 import (
-	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"log"
 	"os"
 	"os/signal"
@@ -32,93 +30,46 @@ type server struct {
 
 // newServer returns a new tftp server
 func newServer(opts *Opts) (*server, error) {
+	abs, err := filepath.Abs(opts.Secure)
+	if err != nil {
+		return nil, err
+	}
+
+	if !dirExists(abs) {
+		return nil, fmt.Errorf("directory '%s' does not exist", opts.Secure)
+	}
+
+	verbose = opts.Verbose
+
 	conn, err := udpListen(opts.Address)
 	if err != nil {
 		return nil, err
 	}
-	verbose = opts.Verbose
-
 	s := &server{
 		Conn:       conn,
 		opts:       opts,
 		nextId:     &atomic.Int64{},
 		log:        newlogger("ditserver", opts.Out, opts.Err),
 		closed:     make(chan bool),
-		dir:        opts.Secure,
+		dir:        abs,
 		connParams: opts.connConfig(),
-	}
-	if dirExists(opts.Secure) {
-		err := errors.New("failed to init sever: tftp directory does not exist")
-		s.log.Error("%v", err)
-		return nil, err
 	}
 	s.pool = sync.Pool{
 		New: func() any {
-			return newsrvconn(s.log, s.connParams)
+			return newsrvconn(s.dir, s.log, s.connParams)
 		},
 	}
 	return s, nil
 }
 
-func (s *server) putconn(sconn *srvconn) {
-	s.log.Info("just before segfault")
-	sconn.buf.Reset() // reset buffer
-	if sconn.f != nil {
-		sconn.f.Seek(0, 0) // seek back to beginning of file
-	}
-	sconn.Conn.Close()
-	s.pool.Put(sconn)
-}
-
 func (s *server) newconn(conn *dit.Conn) (*srvconn, error) {
 	sconn := s.pool.Get().(*srvconn)
 	sconn.Conn = conn
-	req := conn.Request()
-	filename := filepath.Join(s.dir, req.Filename)
-
-	if sconn.buf.Is(filename) {
-		return sconn, nil
-	}
-
-	var flags int
-	switch req.Opcode {
-	case dit.Rrq:
-		flags = os.O_RDONLY
-	case dit.Wrq:
-		flags = os.O_WRONLY | os.O_TRUNC
-		if sconn.cfg.Create {
-			flags |= os.O_CREATE
-		}
-	}
-
-	f, err := os.OpenFile(filename, flags, fs.ModePerm)
-	if err != nil {
-		var serr error
-		switch {
-		// TODO(Joe): this error handling is completely wrong. ex: if its
-		// a new file but cfg says we can create, then we create it.
-		case errors.Is(err, os.ErrExist):
-			serr = sconn.WriteErr(dit.FileAlreadyExists, "file already exists")
-		case errors.Is(err, os.ErrNotExist) && !sconn.cfg.Create:
-			serr = sconn.WriteErr(dit.FileNotFound, "file does not exist")
-		case errors.Is(err, os.ErrPermission):
-			serr = sconn.WriteErr(dit.AccessViolation, "permision denied")
-		default:
-			serr = sconn.WriteErr(dit.NotDefined, "failed for reasons unknown")
-		}
-		if serr != nil {
-			err = fmt.Errorf("%w: %w", err, serr)
-		}
-
-		// close the connection
-		s.putconn(sconn)
-
-		// return error to parent
-		return nil, err
-	}
-	sconn.f = f
-	sconn.buf.WithRequest(req.Opcode, f)
 	return sconn, nil
+}
+
+func (s *server) putconn(sconn *srvconn) {
+	s.pool.Put(sconn)
 }
 
 func (s *server) start() error {
@@ -126,7 +77,7 @@ func (s *server) start() error {
 	cc := make(chan *srvconn)
 
 	go s.handleSignals(cl)
-	s.log.Info("started and running on %s\n", s.Addr())
+	s.log.Info("started and running <addr='%s' directory='%s'>", s.Addr(), s.dir)
 
 	go func() {
 		for {
@@ -137,9 +88,11 @@ func (s *server) start() error {
 			req := conn.Request()
 			s.log.Verbose("recieved %s <file=%s mode=%s> from %s\n", req.Opcode, req.Filename, req.Mode, conn.Addr())
 
+			// get new connection from pool
 			sconn, err := s.newconn(conn)
 			if err != nil {
 				s.log.Error("failed to init new connection handler: %v\n", err)
+				conn.WriteErr(dit.NotDefined, "failed to create connection")
 				continue
 			}
 			go sconn.start(cc)
@@ -149,8 +102,8 @@ func (s *server) start() error {
 	for {
 		select {
 		case <-s.closed:
-			cl <- s
 			close(cc)
+			cl <- s
 			break
 		case conn := <-cc:
 			s.putconn(conn)
@@ -165,7 +118,6 @@ func (s *server) handleSignals(shutdownc <-chan io.Closer) {
 	signal.Notify(c, syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM)
 	for {
 		sig := <-c
-		s.log.Verbose("recieved a signal")
 		sysSig, ok := sig.(syscall.Signal)
 		if !ok {
 			s.log.Fatal("not a unix signal")

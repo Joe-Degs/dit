@@ -281,8 +281,7 @@ func (p ReadWriteRequest) opcode() Opcode {
 	return p.Opcode
 }
 
-// OAckPacket is an optional acknowledgement packet structure as specified in
-// RFC2347
+// OAckPacket is an optional acknowledgement packet structure as specified in RFC2347
 type OAckPacket struct {
 	Opcode  Opcode
 	Options map[Option]int

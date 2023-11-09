@@ -18,7 +18,7 @@ const (
 
 func dirExists(filename string) bool {
 	fi, err := os.Stat(filename)
-	return err != nil && fi.IsDir()
+	return err == nil && fi.IsDir()
 }
 
 type logger struct {
