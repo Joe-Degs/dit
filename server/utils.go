@@ -5,6 +5,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"sync"
 	"time"
 )
 
@@ -22,6 +23,7 @@ func dirExists(filename string) bool {
 }
 
 type logger struct {
+	mu sync.Mutex
 	*log.Logger
 	prefix   string
 	writeErr bool

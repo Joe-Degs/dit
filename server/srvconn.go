@@ -43,7 +43,7 @@ func (s *srvconn) init() error {
 		s.log.Error("stat error: %+v", err)
 		var serr error
 		switch {
-		case errors.Is(err, os.ErrNotExist) && s.cfg.Create:
+		case errors.Is(err, os.ErrNotExist) && !s.cfg.Create:
 			serr = s.WriteErr(dit.FileNotFound, "file does not exist")
 		case errors.Is(err, os.ErrPermission):
 			serr = s.WriteErr(dit.AccessViolation, "permision denied")
@@ -85,7 +85,7 @@ func (s *srvconn) init() error {
 
 func (s *srvconn) start(cl chan<- *srvconn) {
 	if err := s.init(); err != nil {
-		cl <- s
+		s.Close()
 		s.log.Error("failed to initialize connection: %v", err)
 		return
 	}

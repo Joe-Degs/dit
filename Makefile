@@ -1,13 +1,14 @@
 APPS = tftpd
-# MAINS = $(addprefix cmd/,$(addsuffix /main.go, $(APPS)))
+MAINS = $(addprefix cmd/, $(addsuffix /main.go, $(APPS)))
+DEPS = $(shell find . -type f -name '*.go')
 BINS = $(addprefix bin/, $(APPS))
 
-.PHONY: all $(APPS) # install clean
+$(BINS): $(MAINS) $(DEPS)
+	go build -race -o $@ $<
 
-all: $(APPS)
+addcaps: bin/tftpd
+	sudo setcap 'cap_net_bind_service=+ep' $<
 
-$(APPS):
-	go build -race -o bin/$@ cmd/$@/main.go
-
+.PHONY: clean
 clean:
 	rm -f $(BINS)
