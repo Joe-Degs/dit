@@ -1,5 +1,5 @@
-//go:build +linux
-// +build linux
+//go:build darwin
+// +build darwin
 
 package server
 
@@ -17,14 +17,10 @@ func udpListen(addr string) (conn *dit.Conn, err error) {
 	config := &net.ListenConfig{
 		Control: func(net, addr string, c syscall.RawConn) error {
 			return c.Control(func(fd uintptr) {
-				// set socket option to let multiple processes to
-				// listen on the same port
 				unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, syscall.SO_REUSEADDR, 1)
 
-				// set the priority of the socket high to recieve the
-				// packets becuase no packets are coming
-				// socket priority [low - high] => [1 - 7]
-				unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, syscall.SO_PRIORITY, 7)
+				// mac doesn't have SO_PRIORITY so we omit it over here
+				// unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, syscall.SO_PRIORITY, 7)
 			})
 		},
 	}
@@ -36,6 +32,5 @@ func udpListen(addr string) (conn *dit.Conn, err error) {
 }
 
 func restartProcess() error {
-	proc := "/proc/self/exe"
-	return syscall.Exec(proc, os.Args, os.Environ())
+	return syscall.Exec(os.Args[0], os.Args, os.Environ())
 }
