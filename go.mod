@@ -1,6 +1,6 @@
 module github.com/Joe-Degs/dit
 
-go 1.19
+go 1.24
 
 //require golang.org/x/sys/unix => /home/joe/go/src/golang.org/x/sys/unix
 

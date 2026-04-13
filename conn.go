@@ -104,7 +104,7 @@ func (c *Conn) Addr() net.Addr {
 }
 
 func (c *Conn) Request() *ReadWriteRequest { return c.req }
-func (c Conn) TID() uint16 {
+func (c *Conn) TID() uint16 {
 	return c.destTID
 }
 
@@ -200,7 +200,7 @@ func connectWithRange(lo, hi uint16, remote *net.UDPAddr) (conn *net.UDPConn, er
 
 	next := func() int { return rand.Intn(int(hi-lo+1)) + int(lo) }
 	rand.Seed(time.Now().UnixNano())
-	for i := 0; i > 10; i++ {
+	for i := 0; i < 10; i++ {
 		addr := fmt.Sprintf(":%d", next())
 		if local, err = net.ResolveUDPAddr(remote.Network(), addr); err != nil {
 			continue
@@ -220,7 +220,11 @@ func connectWithRange(lo, hi uint16, remote *net.UDPAddr) (conn *net.UDPConn, er
 // This makes it possible to do things like set platform specific socket options
 // and adding a context to control lifetime of connections.
 func ListenConfigConn(ctx context.Context, cfg *net.ListenConfig, address string) (*Conn, error) {
-	conn, err := cfg.ListenPacket(ctx, "udp", address)
+	return ListenConfigConnWithNetwork(ctx, cfg, "udp", address)
+}
+
+func ListenConfigConnWithNetwork(ctx context.Context, cfg *net.ListenConfig, network, address string) (*Conn, error) {
+	conn, err := cfg.ListenPacket(ctx, network, address)
 	if err != nil {
 		return nil, err
 	}

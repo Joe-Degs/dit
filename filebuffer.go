@@ -65,26 +65,31 @@ func (f *FileBuffer) Is(name string) bool {
 }
 
 // Reset clears the temporary buffer that stores the most recent data
-// read from or written to the underlying file.
+// read from or written to the underlying file, and resets the buffered reader/writer
+// to sync with the current file position.
 //
 // This should be called after a successful ACK is received and retransmission
 // of the current block is no longer needed, or when preparing to handle a new
 // TFTP request with the same buffer.
 func (f *FileBuffer) Reset() {
 	f.buf.Reset()
+	// Reset buffered reader/writer to sync with current file position
+	if f.r != nil {
+		f.r = bufio.NewReader(f.f)
+	}
+	if f.w != nil {
+		f.w = bufio.NewWriter(f.f)
+	}
 }
 
-// Read attempts to read exactly len(b) bytes from the underlying buffered reader
-// into b. It returns the number of bytes read and an error if fewer than len(b)
-// bytes were read.
-//
-// It returns io.EOF if no bytes could be read and io.ErrUnexpectedEOF if EOF was
-// encountered before reading len(b) bytes. Calls io.ReadFull under the hood.
+// Read reads data from the underlying buffered reader into b. It returns the 
+// number of bytes read and any error encountered. Unlike io.ReadFull, this
+// method may return fewer bytes than len(b) without an error, making it
+// suitable for TFTP where the last block is typically shorter.
 //
 // Note: This method does NOT update the retransmission buffer. Use ReadNext if you
 // need to store data for potential retransmission.
 func (f *FileBuffer) Read(b []byte) (int, error) {
-	// return io.ReadFull(f.r, b)
 	return f.r.Read(b)
 }
 

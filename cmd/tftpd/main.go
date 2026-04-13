@@ -16,6 +16,11 @@ import (
 var (
 	// -profile cpu, mem
 	profile = flag.String("profile", "", "run go pprof")
+
+	// Build-time variables
+	version   = "dev"
+	gitCommit = "unknown"
+	buildTime = "unknown"
 )
 
 func init() {
@@ -41,7 +46,7 @@ func main() {
 		}
 	}
 
-	server.Main(os.Args[1:], os.Stdout, os.Stderr)
+	server.MainWithVersion(os.Args[1:], os.Stdout, os.Stderr, version, gitCommit, buildTime)
 }
 
 func doProfile(typ string) func() {

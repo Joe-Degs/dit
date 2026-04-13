@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -268,7 +269,16 @@ func (p *ReadWriteRequest) marshal() ([]byte, error) {
 	data = append(data, nullTerminate(p.Filename)...)
 	data = append(data, nullTerminate(p.Mode)...)
 	if len(p.Options) >= 1 {
-		for opt, val := range p.Options {
+		// Sort options for deterministic output
+		var opts []Option
+		for opt := range p.Options {
+			opts = append(opts, opt)
+		}
+		sort.Slice(opts, func(i, j int) bool {
+			return opts[i] < opts[j]
+		})
+		for _, opt := range opts {
+			val := p.Options[opt]
 			valStr := strconv.Itoa(val)
 			data = append(data, nullTerminate(UnmarshalOpts(opt))...)
 			data = append(data, nullTerminate(valStr)...)
@@ -320,7 +330,16 @@ func (p *OAckPacket) marshal() ([]byte, error) {
 	data := make([]byte, 2)
 	binary.BigEndian.PutUint16(data, uint16(p.Opcode))
 	if len(p.Options) >= 1 {
-		for opt, val := range p.Options {
+		// Sort options for deterministic output
+		var opts []Option
+		for opt := range p.Options {
+			opts = append(opts, opt)
+		}
+		sort.Slice(opts, func(i, j int) bool {
+			return opts[i] < opts[j]
+		})
+		for _, opt := range opts {
+			val := p.Options[opt]
 			data = append(data, nullTerminate(UnmarshalOpts(opt))...)
 			data = append(data, nullTerminate(strconv.Itoa(val))...)
 		}

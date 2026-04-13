@@ -1,9 +1,11 @@
 package server
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"io"
-	"log"
+	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -15,14 +17,25 @@ import (
 	"github.com/Joe-Degs/dit"
 )
 
+func isClosedNetworkError(err error) bool {
+	// Check if it's a network closed error using proper error handling
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
+		return opErr.Err.Error() == "use of closed network connection"
+	}
+	return false
+}
+
 type server struct {
 	*dit.Conn
 	log        *logger
 	opts       *Opts
 	nextId     *atomic.Int64
 	dir        string
-	closed     chan bool
+	ctx        context.Context
+	cancel     context.CancelFunc
 	connParams config
+	pidfile    *os.File
 
 	// connection pool
 	pool sync.Pool
@@ -41,18 +54,45 @@ func newServer(opts *Opts) (*server, error) {
 
 	verbose = opts.Verbose
 
-	conn, err := udpListen(opts.Address)
+	connParams := opts.connConfig()
+	conn, err := udpListen(opts.Address, connParams.Network)
 	if err != nil {
 		return nil, err
 	}
+
+	log := newlogger("ditserver", opts.Out, opts.Err)
+
+	// Drop privileges after binding to the socket but before serving
+	if opts.User != "" {
+		log.Verbose("attempting to drop privileges to user '%s'", opts.User)
+		if err := dropPrivileges(opts.User); err != nil {
+			conn.Close()
+			return nil, fmt.Errorf("privilege drop failed: %w", err)
+		}
+		log.Info("successfully dropped privileges to user '%s' (uid=%d, gid=%d)", opts.User, os.Getuid(), os.Getgid())
+	}
+
+	pidfile, err := createPidfile(opts.Pidfile)
+	if err != nil {
+		conn.Close()
+		return nil, err
+	}
+	if pidfile != nil {
+		log.Info("created pidfile %s with PID %d", opts.Pidfile, os.Getpid())
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+
 	s := &server{
 		Conn:       conn,
 		opts:       opts,
 		nextId:     &atomic.Int64{},
-		log:        newlogger("ditserver", opts.Out, opts.Err),
-		closed:     make(chan bool),
+		log:        log,
+		ctx:        ctx,
+		cancel:     cancel,
 		dir:        abs,
-		connParams: opts.connConfig(),
+		connParams: connParams,
+		pidfile:    pidfile,
 	}
 	s.pool = sync.Pool{
 		New: func() any {
@@ -73,47 +113,62 @@ func (s *server) putconn(sconn *srvconn) {
 }
 
 func (s *server) start() error {
-	cl := make(chan io.Closer)
 	cc := make(chan *srvconn)
 
-	go s.handleSignals(cl)
+	go s.handleSignals()
 	s.log.Info("started and running <addr='%s' directory='%s'>", s.Addr(), s.dir)
 
 	go func() {
+		defer close(cc)
 		for {
-			conn, err := s.Accept()
+			select {
+			case <-s.ctx.Done():
+				s.log.Verbose("accept loop shutting down")
+				return
+			default:
+			}
+
+			conn, err := s.AcceptRange(s.connParams.PortRangeLo, s.connParams.PortRangeHi)
 			if err != nil {
-				log.Fatal(err)
+				select {
+				case <-s.ctx.Done():
+					return
+				default:
+					if isClosedNetworkError(err) {
+						s.log.Verbose("accept connection closed during shutdown")
+						return
+					}
+					s.log.Error("accept error: %v", err)
+					return
+				}
 			}
 			req := conn.Request()
 			s.log.Verbose("recieved %s <file=%s mode=%s> from %s\n", req.Opcode, req.Filename, req.Mode, conn.Addr())
 
-			// get new connection from pool
 			sconn, err := s.newconn(conn)
 			if err != nil {
 				s.log.Error("failed to init new connection handler: %v\n", err)
 				conn.WriteErr(dit.NotDefined, "failed to create connection")
 				continue
 			}
-			go sconn.start(cc)
+			go sconn.start(s.ctx, cc)
 		}
 	}()
 
 	for {
 		select {
-		case <-s.closed:
-			close(cc)
-			cl <- s
-			break
+		case <-s.ctx.Done():
+			s.log.Verbose("server context cancelled, shutting down")
+			return s.Close()
 		case conn := <-cc:
-			s.putconn(conn)
+			if conn != nil {
+				s.putconn(conn)
+			}
 		}
 	}
-
-	return s.Close()
 }
 
-func (s *server) handleSignals(shutdownc <-chan io.Closer) {
+func (s *server) handleSignals() {
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM)
 	for {
@@ -130,21 +185,27 @@ func (s *server) handleSignals(shutdownc <-chan io.Closer) {
 			}
 		case syscall.SIGINT, syscall.SIGTERM:
 			s.log.Verbose(`handling termination (%v) signal`, sig)
-			s.closed <- true
 			s.log.Info(`got "%v" signal: shutting down`, sig)
-			donec := make(chan bool)
+
+			// Cancel context to trigger graceful shutdown
+			s.cancel()
+
+			// Give a moment for graceful shutdown
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+
+			done := make(chan struct{})
 			go func() {
-				cl := <-shutdownc
-				if err := cl.Close(); err != nil {
-					s.log.Fatalf("error while shutting down: %v", err)
-				}
-				donec <- true
+				<-s.ctx.Done()
+				removePidfile(s.pidfile, s.opts.Pidfile)
+				close(done)
 			}()
+
 			select {
-			case <-donec:
+			case <-done:
 				s.log.Info("Goodbye!")
 				os.Exit(0)
-			case <-time.After(2 * time.Second):
+			case <-shutdownCtx.Done():
 				s.log.Fatal("timedout while trying to shutdown.")
 			}
 		default:
@@ -154,12 +215,22 @@ func (s *server) handleSignals(shutdownc <-chan io.Closer) {
 }
 
 func Main(args []string, stdout io.Writer, stderr io.Writer) {
+	MainWithVersion(args, stdout, stderr, "dev", "unknown", "unknown")
+}
+
+func MainWithVersion(args []string, stdout io.Writer, stderr io.Writer, version, gitCommit, buildTime string) {
 	options, getopt := NewOpts()
 	if _, err := getopt.Parse(args); err != nil {
 		exitf("failed to parse args: %v", err)
 	}
 	if getopt.Called("help") {
 		exitf("%s\n", getopt.Help())
+	}
+	if getopt.Called("version") {
+		fmt.Fprintf(stdout, "tftpd version %s\n", version)
+		fmt.Fprintf(stdout, "Git commit: %s\n", gitCommit)
+		fmt.Fprintf(stdout, "Build time: %s\n", buildTime)
+		os.Exit(0)
 	}
 	options.outputs(stdout, stderr)
 
